@@ -202,18 +202,134 @@ def login_caregiver(tokens):
 
 
 def search_caregiver_schedule(tokens):
-    """
-    TODO: Part 2
-    """
-    pass
+    global current_caregiver
+    global current_patient
 
+    # check if a user has already logged in
+    if current_caregiver is None and current_patient is None:
+        print("Please login first")
+        return
+    
+    # check 2: the length for tokens need to be exactly 2 to include all information (with the operation name)
+    if len(tokens) != 2:
+        print("Please try again")
+        return
+    
+    date = tokens[1]
+    cm = ConnectionManager()
+    conn = cm.create_connection()
+
+    select_date = "SELECT Username FROM Availabilities WHERE Time = %s ORDER BY Username"
+    select_vaccines = "SELECT Name, Doses FROM Vaccines"
+    try:
+        cursor = conn.cursor(as_dict=True)
+        # query caregivers
+        cursor.execute(select_date, date)
+        caregivers = [row['Username'] for row in cursor]
+
+        # query vaccines
+        cursor.execute(select_vaccines)
+        vaccines = [(row['Name'], row['Doses']) for row in cursor]
+
+        # print caregivers
+        for caregiver in caregivers:
+            print(caregiver)
+        
+        # print vaccines
+        for name, doses in vaccines:
+            print(f"{name} {doses}")
+        
+    except pymssql.Error as e:
+        print("Please try again")
+        print("Db-Error:", e)
+        quit()
+    except ValueError:
+        print("Please try again")
+        return
+    except Exception as e:
+        print("Please try again")
+        print("Error:", e)
+        return
+    finally:
+        cm.close_connection()
 
 def reserve(tokens):
-    """
-    TODO: Part 2
-    """
-    pass
+    global current_patient
+    # check 1: check if a user's already logged in
+    if current_patient is None and current_caregiver is None:
+        print("Please login first")
+        return
+    
+    #  check 2: check if the current logged-in user is a patient
+    if current_patient is None:
+        print("Please login as a patient")
+        return
 
+    # check 3: the length for tokens need to be exactly 3 to include all information (with the operation name)
+    if len(tokens) != 3:
+        print("Please try again")
+        return
+
+    date = tokens[1]
+    vaccine_name = tokens[2]
+    
+    cm = ConnectionManager()
+    conn = cm.create_connection()
+
+    try:
+        cursor = conn.cursor(as_dict=True)
+
+        select_caregiver = "SELECT TOP 1 Username FROM Availabilities WHERE Time = %s ORDER BY Username"
+        cursor.execute(select_caregiver, date)
+        caregiver = cursor.fetchone()
+
+        # Check caregiver availability
+        if not caregiver:
+            print("No caregiver is available")
+            return
+        
+        caregiver_name = caregiver['Username']
+
+        select_vaccine = "SELECT Doses FROM Vaccines WHERE Name = %s"
+        cursor.execute(select_vaccine, vaccine_name)
+        vaccine = cursor.fetchone()
+        # Check vaccine availability
+        if not vaccine or vaccine['Doses'] < 1:
+            print("Not enough available doses")
+            return 
+        
+        # Create appointment
+        create_appointment_id = "SELECT NEXT VALUE FOR AppointmentSeq AS AppointmentID"
+        cursor.execute(create_appointment_id)
+        appointment_id = cursor.fetchone()['AppointmentID']
+
+        insert_appointment = "INSERT INTO Reservations (ID, PatientName, CaregiverName, VaccineName, Time) VALUES (%s, %s, %s, %s, %s)"
+        cursor.execute(insert_appointment, (appointment_id, current_patient.username, caregiver_name, vaccine_name, date))
+
+        # Update caregiver availability and vaccine doses
+        delete_availability = "DELETE FROM Availabilities WHERE Username = %s AND Time = %s"
+        cursor.execute(delete_availability, (caregiver_name, date))
+
+        update_vaccines = "UPDATE Vaccines SET Doses = Doses - 1 WHERE Name = %s"
+        cursor.execute(update_vaccines, vaccine_name)
+
+        conn.commit()
+
+        print(f"Appointment ID {appointment_id}, Caregiver username {caregiver_name}")
+
+    except pymssql.Error as e:
+        print("Please try again")
+        print("Db-Error:", e)
+        conn.rollback()
+    except ValueError:
+        print("Please try again")
+        return
+    except Exception as e:
+        print("Please try again")
+        print("Error:", e)
+        conn.rollback()
+    finally:
+        cm.close_connection()
 
 def upload_availability(tokens):
     #  upload_availability <date>
@@ -252,11 +368,65 @@ def upload_availability(tokens):
 
 
 def cancel(tokens):
-    """
-    TODO: Extra Credit
-    """
-    pass
+    global current_caregiver, current_patient
+    # check 1: check if a user's already logged in
+    if current_patient is None and current_caregiver is None:
+        print("Please login first")
+        return
+    
+    # check 3: the length for tokens need to be exactly 2 to include all information (with the operation name)
+    if len(tokens) != 2:
+        print("Please try again!")
+        return
 
+    try:
+        appointment_id = int(tokens[1])
+    except ValueError:
+        print("Invalid appointment ID format!")
+        return
+    
+    cm = ConnectionManager()
+    conn = cm.create_connection()
+    cursor = conn.cursor(as_dict=True)
+
+    try:
+        select_appointment = "SELECT ID, Time, CaregiverName, PatientName FROM Reservations WHERE ID = %s"
+        cursor.execute(select_appointment, appointment_id)
+        appointment = cursor.fetchone()
+
+        if appointment is None:
+            print("Appointment not found!")
+            return
+        
+        # Check if the current user is authorized to cancel this appointment
+        if current_caregiver is not None and appointment["CaregiverName"] != current_caregiver.username:
+            print("You are not authorized to cancel this appointment.")
+            return
+        if current_patient is not None and appointment["PatientName"] != current_patient.username:
+            print("You are not authorized to cancel this appointment.")
+            return
+        
+         # Delete the appointment from the Reservations table
+        delete_appointment = "DELETE FROM Reservations WHERE ID = %s"
+        cursor.execute(delete_appointment, appointment_id)
+
+        # Update the caregiver's availability
+        update_availability = "INSERT INTO Availabilities (Username, Time) VALUES (%s, %s)"
+        cursor.execute(update_availability, (appointment["CaregiverName"], appointment["Time"]))
+
+        conn.commit()
+        print(f"Appointment {appointment_id} has been canceled successfully.")
+
+    except pymssql.Error as e:
+        print("An error occurred while processing the cancellation.")
+        print("Db-Error:", e)
+        conn.rollback()
+    except Exception as e:
+        print("An unexpected error occurred.")
+        print("Error:", e)
+        conn.rollback()
+    finally:
+        cm.close_connection()
 
 def add_doses(tokens):
     #  add_doses <vaccine> <number>
@@ -315,17 +485,62 @@ def add_doses(tokens):
 
 
 def show_appointments(tokens):
-    '''
-    TODO: Part 2
-    '''
-    pass
+    global current_caregiver, current_patient
+    # check 1: check if a user's already logged in
+    if current_patient is None and current_caregiver is None:
+        print("Please login first")
+        return
+    
+    # check 1: the length for tokens need to be exactly 1 to include all information (with the operation name)
+    if len(tokens) != 1:
+        print("Please try again")
+        return
+    
+    cm = ConnectionManager()
+    conn = cm.create_connection()
 
+    try:
+        cursor = conn.cursor(as_dict=True)
+
+        if current_caregiver:
+            select_appointments = "SELECT ID, VaccineName, Time, PatientName FROM Reservations WHERE CaregiverName = %s ORDER BY ID"
+            cursor.execute(select_appointments, current_caregiver.username)
+            appointments = cursor.fetchall()
+            for appt in appointments:
+                print(f"{appt['ID']} {appt['VaccineName']} {appt['Time']} {appt['PatientName']}")
+
+        elif current_patient:
+            select_appointments = "SELECT ID, VaccineName, Time, CaregiverName FROM Reservations WHERE PatientName = %s ORDER BY ID"
+            cursor.execute(select_appointments, current_patient.username)
+            appointments = cursor.fetchall()
+            for appt in appointments:
+                print(f"{appt['ID']} {appt['VaccineName']} {appt['Time']} {appt['CaregiverName']}")
+
+    except pymssql.Error as e:
+        print("Please try again")
+        print("Db-Error:", e)
+        quit()
+    except Exception as e:
+        print("Please try again")
+        print("Error:", e)
+        return
+    finally:
+        cm.close_connection()    
 
 def logout(tokens):
-    """
-    TODO: Part 2
-    """
-    pass
+    global current_patient, current_caregiver
+    
+    if current_caregiver is None and current_patient is None:
+        print("Please login first")
+        return
+    
+    if len(tokens) != 1:
+        print("Please try again")
+        return
+    
+    current_patient = None
+    current_caregiver = None
+    print('Successfully logged out')
 
 
 def start():
